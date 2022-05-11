@@ -1,0 +1,329 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(lubridate)
+library(pins)
+library(ggridges)
+library(viridis)
+theme_set(theme_light())
+
+
+data <- 
+  read.csv('train.csv') %>% 
+  clean_names() %>% 
+  mutate(date = as_date(date))
+
+test <-
+  read.csv('test.csv') %>% 
+  clean_names() %>% 
+  mutate(date = as_date(date))
+
+store <- 
+  read.csv('store.csv') %>% 
+  clean_names()
+
+pal <- 
+  c('#003f5c',
+    '#2f4b7c',
+    '#665191',
+    '#a05195',
+    '#d45087',
+    '#f95d6a',
+    '#ff7c43',
+    '#ffa600')
+```
+
+```{r}
+head(data)
+```
+
+```{r}
+head(store)
+```
+# Number of Stores
+```{r}
+data %>% 
+  group_by(store) %>% 
+  count()
+```
+
+```{r, fig.width=10, fig.height=5, message=FALSE}
+data %>% 
+  mutate(week_of_year = week(date),
+         year = year(date)) %>% 
+  group_by(week_of_year, year) %>% 
+  summarize(total_sales = sum(sales),
+            week = min(date)) %>% 
+  ggplot(aes(x = week, y = total_sales)) +
+  geom_line() +
+  labs(title = 'Total Weekly Sales', x = 'Date', y = 'Total Sales')
+```
+
+# Create train and validation sets
+```{r}
+train <-
+  data %>% 
+  filter(date <= '2015-01-31')
+
+valid <-
+  data %>% 
+  filter(date > '2015-01-31')
+
+
+board <- board_folder(getwd())
+
+board %>% 
+  pin_write(train)
+
+board %>% 
+  pin_write(valid)
+```
+
+
+# Sales Distribution
+```{r}
+train %>% 
+  ggplot(aes(x = sales)) +
+  geom_density(fill = pal[1])
+```
+
+Why are there zero values for sales?
+In the vast majority of instances, zero sales are recorded when stores are not open. Judging from above, sometimes this is the store is not open or it closes for holidays at the end of the year. 
+```{r}
+train %>% 
+  filter(sales == 0) %>% 
+  filter(open == 1)
+```
+
+We can very easily predict sales for days when the store is not open. Let's exclude these observations as we continue with the analysis. 
+```{r}
+tr_open <-
+  train %>% 
+  filter(open == 1)
+```
+
+
+
+# Sales by Day of Week
+```{r}
+tr_open %>% 
+  mutate(day_of_week = as.factor(day_of_week)) %>% 
+  ggplot(aes(x = sales, y = day_of_week, fill = day_of_week)) +
+  geom_density_ridges() +
+  scale_fill_manual(values = pal)
+  
+
+```
+
+```{r}
+tr_open %>% 
+  mutate(day_of_week = as.factor(day_of_week)) %>% 
+  ggplot(aes(x = day_of_week, y = sales, fill = day_of_week)) +
+  geom_boxplot() +
+  scale_fill_manual(values = pal)
+```
+Assuming Sunday is day 1, weekends have the highest amount of sales but also the largest variability. 
+
+
+# Week of Year
+```{r}
+train %>% 
+  mutate(week_of_year = week(date)) %>% 
+  group_by(week_of_year) %>% 
+  summarize(avg_sales = mean(sales)) %>% 
+  ggplot(aes(x = week_of_year, y = avg_sales)) +
+  geom_point() +
+  stat_smooth()
+```
+
+# Month of Year
+```{r}
+train %>% 
+  mutate(month_of_year = month(date, label=TRUE)) %>% 
+  ggplot(aes(x = month_of_year, y = sales, fill = month_of_year)) +
+  geom_boxplot() +
+  scale_fill_viridis(discrete = TRUE, option = 'B')
+
+```
+
+
+
+
+
+# Sales by Customers
+```{r}
+tr_open %>% 
+  ggplot(aes(x = customers, y = sales)) +
+  geom_point(alpha = .3, color = pal[2])
+```
+
+This is nice and is what we'd expect, but we won't know the number of customers to be able to predict sales. Neither are known in advance. 
+
+
+# Promotions
+```{r}
+tr_open %>% 
+  mutate(promo = as.factor(promo)) %>% 
+  ggplot(aes(x = promo, y = sales, fill = promo)) +
+  geom_boxplot() +
+  scale_fill_manual(values = c(pal[2], pal[5]))
+```
+
+
+
+
+
+# State Holiday
+```{r}
+tr_open %>% 
+  ggplot(aes(x = state_holiday, y = sales, fill = state_holiday)) +
+  geom_boxplot() +
+  scale_fill_manual(values = pal[seq(1, 8, 2)])
+```
+
+# School Holiday
+```{r}
+tr_open %>% 
+  mutate(school_holiday = as.factor(school_holiday)) %>% 
+  ggplot(aes(x = school_holiday, y = sales, fill = school_holiday)) +
+  geom_boxplot() +
+  scale_fill_manual(values = c(pal[2], pal[5]))
+```
+
+# Store Level Data
+
+## Store Type
+```{r}
+tr_open %>% 
+  left_join(
+    store %>% 
+      select(store, store_type), by = 'store'
+  ) %>% 
+  ggplot(aes(x = store_type, y = sales, fill = store_type)) +
+  geom_boxplot() +
+  scale_fill_manual(values = pal[seq(1, 8, 2)])
+
+
+
+```
+
+# Assortment
+```{r}
+tr_open %>% 
+  left_join(
+    store %>% 
+      select(store, assortment), by = 'store'
+  ) %>% 
+  ggplot(aes(x = assortment, y = sales, fill = assortment)) +
+  geom_boxplot() +
+  scale_fill_manual(values = pal[seq(1, 8, 2)])
+```
+
+## Competition
+```{r}
+comp_df <- 
+  tr_open %>% 
+    select(store, sales, date) %>% 
+    left_join(
+      store %>% 
+        select(store, competition_distance, competition_open_since_month, competition_open_since_year), 
+      by = 'store'
+    ) %>% 
+  mutate(competition_open_since = make_date(year = competition_open_since_year,
+                                            month = competition_open_since_month,
+                                            day = 1),
+         months_competition = round(interval(competition_open_since, date) / months(1)),
+         months_competition = ifelse(months_competition < 0, NA, months_competition))
+
+  
+```
+
+
+```{r}
+comp_df %>% 
+  group_by(store, month(date), year(date)) %>% 
+  summarize(total_sales = sum(total_sales),
+            )
+```
+
+
+## Promo2
+```{r}
+
+months <- c('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec')
+
+store_ <- store
+for (month in months){
+store_ <- 
+  store_ %>% 
+  mutate("{month}":= ifelse(str_detect(promo_interval, month), 1, 0)) 
+}
+
+store_
+```
+
+```{r}
+promo2_df <-
+  tr_open %>% 
+  left_join(
+    store %>% 
+      select(store, promo2, promo_interval, promo2since_week, promo2since_year),
+    by = 'store'
+  ) %>% 
+  mutate(month_of_year = as.character(month(date, label = TRUE)),
+         p2_start_date = make_date(year = promo2since_year, month = 1, day = 1) + weeks(promo2since_week),
+         ind_promo2_month = ifelse(str_detect(promo_interval, month_of_year) & date >= p2_start_date, 1, 0),
+         months_in_promo2 = interval(p2_start_date, date) / months(1))
+
+
+#check 
+# promo2_df %>% 
+#   filter(str_detect(promo_interval, month_of_year)) %>% 
+#   filter(ind_promo2_month == 0)
+
+
+```
+
+### Promo2 Months vs Non Participators 
+```{r}
+promo2_df %>% 
+  group_by(month_of_year, ind_promo2_month) %>% 
+  summarize(avg_sales = mean(sales)) %>% 
+  mutate(ind_promo2_month = as.factor(ind_promo2_month)) %>% 
+  ggplot(aes(x = (month_of_year), y = avg_sales, fill = ind_promo2_month)) +
+  geom_bar(stat = 'identity', position = 'dodge') +
+  scale_fill_manual(values = c(pal[2], pal[5]))
+```
+
+# Comparison of promo2 vs non-promo2 months for only stores participating
+```{r}
+promo2_df %>% 
+  filter(promo2 == 1) %>% 
+  group_by(month_of_year, ind_promo2_month) %>% 
+  summarize(avg_sales = mean(sales)) %>% 
+  mutate(ind_promo2_month = as.factor(ind_promo2_month)) %>% 
+  ggplot(aes(x = (month_of_year), y = avg_sales, fill = ind_promo2_month)) +
+  geom_bar(stat = 'identity', position = 'dodge') +
+  scale_fill_manual(values = c(pal[1], pal[5]))
+```
+
+
+
+### Length of time in Promo2
+```{r}
+promo2_df %>% 
+  filter(promo2 == 1,
+         months_in_promo2 > 0) %>% 
+  ggplot(aes(x = months_in_promo2, y = sales)) +
+  stat_smooth()
+
+```
+
