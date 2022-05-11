@@ -1,0 +1,191 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+Multilevel modeling - no pooling. 
+This approach uses dplyr and tidyverse to build a model for each individual store. 
+
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(pins)
+
+options(scipen = 999)
+
+```
+
+
+```{r}
+
+board <-
+  board_folder(getwd())
+
+train <- 
+  board %>% 
+  pin_read('train') %>% 
+  mutate(day_of_week = as.factor(day_of_week))
+
+valid <-
+  board %>% 
+  pin_read('valid') %>% 
+  mutate(day_of_week = as.factor(day_of_week))
+```
+
+
+
+
+
+```{r}
+
+mars_model <- function(x){
+ 
+  mars_rec <- 
+  recipe(sales ~ day_of_week + open + promo, data = x) %>% 
+  step_dummy(all_nominal())
+
+k_folds <- vfold_cv(x)
+
+mars_model <- mars(num_terms = tune(), prod_degree = tune()) %>% 
+  set_mode('regression') %>% 
+  set_engine('earth')
+
+mars_grid <-
+  grid_regular(parameters(mars_model), levels = 10)
+
+mars_wf <-
+  workflow() %>% 
+  add_model(mars_model) %>% 
+  add_recipe(mars_rec) 
+
+mars_res <-
+  mars_wf %>% 
+  tune_grid(resamples = k_folds,
+            grid = mars_grid,
+            metrics = metric_set(mae))
+
+mars_tune <-
+  mars_res %>% 
+  select_best('mae')
+
+mars_wf <-
+  mars_wf %>% 
+  finalize_workflow(mars_tune) 
+
+final_model <-
+  fit(mars_wf, x)
+
+return(final_model)
+  
+}
+
+```
+
+
+
+
+
+# Train nested mars models
+```{r}
+mars_models <-
+  train %>% 
+  group_by(store) %>% 
+  nest() %>% 
+  mutate(model = map(data, mars_model))
+  
+```
+
+
+
+```{r}
+baseline_model %>% 
+  augment() %>% 
+  ggplot(aes(x = .fitted, y = sales)) +
+  geom_point()
+```
+
+
+
+```{r}
+baseline_preds <- tibble(true = valid$sales, pred = predict(baseline_model, valid))
+
+
+baseline_preds %>% 
+  ggplot(aes(x = pred, y = true)) +
+  geom_point()
+```
+
+```{r}
+baseline_preds %>% 
+  mutate(residual = pred - true) %>% 
+  summarize(mean(abs(residual)))
+```
+
+
+# Modeling by store, Nested Models
+
+
+```{r}
+train %>% 
+  group_by(store) %>% 
+  nest()
+```
+
+
+
+
+
+```{r}
+train_7 <-
+  train %>% 
+  filter(store == 2) %>% 
+    left_join(
+    store %>% 
+      select(store, promo2, promo_interval, promo2since_week, promo2since_year),
+    by = 'store'
+  ) %>% 
+  mutate(month_of_year = as.character(month(date, label = TRUE)),
+         p2_start_date = make_date(year = promo2since_year, month = 1, day = 1) + weeks(promo2since_week),
+         ind_promo2_month = ifelse(str_detect(promo_interval, month_of_year) & date >= p2_start_date, 1, 0),
+         months_in_promo2 = interval(p2_start_date, date) / months(1))
+
+valid_7 <-
+  valid %>% 
+  filter(store == 2) %>% 
+    left_join(
+    store %>% 
+      select(store, promo2, promo_interval, promo2since_week, promo2since_year),
+    by = 'store'
+  ) %>% 
+  mutate(month_of_year = as.character(month(date, label = TRUE)),
+         p2_start_date = make_date(year = promo2since_year, month = 1, day = 1) + weeks(promo2since_week),
+         ind_promo2_month = ifelse(str_detect(promo_interval, month_of_year) & date >= p2_start_date, 1, 0),
+         months_in_promo2 = interval(p2_start_date, date) / months(1))
+
+train_7
+```
+
+```{r}
+lm7 <- lm(sales ~ day_of_week + open + promo + state_holiday + school_holiday + ind_promo2_month + months_in_promo2, data = train_7)
+summary(lm7)
+```
+
+```{r}
+preds7 <- tibble(true = valid_7$sales, pred = predict(lm7, valid_7))
+
+
+preds7 %>% 
+  ggplot(aes(x = pred, y = true)) +
+  geom_point()
+```
+
+```{r}
+preds7 %>% 
+  mutate(residual = pred - true) %>% 
+  summarize(mean(abs(residual)))
+```
+
+
+
