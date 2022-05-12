@@ -98,40 +98,35 @@ mars_models <-
 ```
 
 
-
 ```{r}
-baseline_model %>% 
-  augment() %>% 
-  ggplot(aes(x = .fitted, y = sales)) +
-  geom_point()
-```
-
-
-
-```{r}
-baseline_preds <- tibble(true = valid$sales, pred = predict(baseline_model, valid))
-
-
-baseline_preds %>% 
-  ggplot(aes(x = pred, y = true)) +
-  geom_point()
-```
-
-```{r}
-baseline_preds %>% 
-  mutate(residual = pred - true) %>% 
-  summarize(mean(abs(residual)))
-```
-
-
-# Modeling by store, Nested Models
-
-
-```{r}
-train %>% 
+valid_results <- 
+  valid %>% 
   group_by(store) %>% 
-  nest()
+  nest() %>% 
+  left_join(
+    mars_models %>% 
+      select(store, model)
+  ) %>% 
+  mutate(pred = map2(model, data, predict)) %>% 
+  select(data, pred) %>% 
+  unnest()
+
+valid_results %>% 
+  ungroup() %>%
+  mutate(rmspe = ((sales - .pred) / sales)**2,
+         rmspe = ifelse(rmspe == Inf | rmspe == -Inf, 0, rmspe)) %>% 
+  summarize(avg_residual = mean(abs(sales - .pred)),
+            rmspe = sqrt(mean(rmspe, na.rm = TRUE)))
 ```
+
+
+
+
+
+
+
+
+
 
 
 
