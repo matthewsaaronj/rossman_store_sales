@@ -1,0 +1,164 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(pins)
+library(lubridate)
+library(janitor)
+
+options(scipen = 999)
+```
+
+```{r}
+board <-
+  board_folder(getwd())
+
+train <- 
+  board %>% 
+  pin_read('train') %>% 
+  mutate(day_of_week = as.factor(day_of_week))
+
+valid <-
+  board %>% 
+  pin_read('valid') %>% 
+  mutate(day_of_week = as.factor(day_of_week))
+
+store <- 
+  read.csv('store.csv') %>% 
+  clean_names()
+```
+
+
+```{r}
+set.seed(4)
+
+train_sub <-
+  train %>% 
+  filter(store %in% c(1, 2)) %>% 
+  left_join(store, by = c('store' = 'store'))
+
+train_sub
+```
+
+# Feature Engineering Ideas
+# Holidays (Christmas)
+# days in promo2
+# days since competition opened
+# indicator for whether it's during a promo2 month
+# month of year
+# day of month
+# use some store level data such as the
+  : average sales for that store for that day -- but you need to be careful not to leak information with this.
+  - think of other store level data as this will be the optimal approach
+
+```{r}
+xgb_rec <-
+  recipe(
+    sales ~
+      day_of_week +
+      open +
+      promo +
+      state_holiday +
+      school_holiday +
+      store +
+      date
+    , data = train
+  ) %>% 
+  update_role(store , new_role = 'id variable') %>% 
+  update_role(date, new_role = 'id variable') %>% 
+  step_dummy(state_holiday, one_hot = TRUE) %>% 
+  step_mutate(day_of_week = as.numeric(as.character(day_of_week)))
+
+
+xgb_rec
+
+```
+```{r}
+set.seed(42)
+
+
+sliding_period(train %>% arrange(date), date, period = 'month', lookback = Inf, assess_stop = 2, every = 4, complete = TRUE) %>% 
+  mutate(train_data = map(splits, analysis),
+         test_data = map(splits, assessment)) %>% 
+  select(-splits) %>% 
+  pivot_longer(-id) %>% 
+  unnest(value) %>% 
+  group_by(id, name) %>% 
+  summarize(cnt = n(),
+            min_date = min(date),
+            max_date = max(date)) %>% 
+  arrange(id, min_date)
+
+```
+
+
+```{r}
+folds <- 
+  sliding_period(train %>% arrange(date), date, period = 'month', lookback = Inf, assess_stop = 2, every = 4)
+
+folds
+```
+
+
+```{r}
+xgb_model <-
+  boost_tree(
+    trees = 500
+  ) %>% 
+  set_mode('regression') %>% 
+  set_engine('xgboost')
+
+xgb_wf <-
+  workflow() %>% 
+  add_recipe(xgb_rec) %>% 
+  add_model(xgb_model)
+
+keep_pred <- control_resamples(save_pred = TRUE, save_workflow = TRUE) 
+
+xgb_res <-
+  xgb_wf %>% 
+  fit_resamples(resamples = folds,
+                control = keep_pred,
+                metrics = metric_set(mae))
+
+
+```
+
+```{r}
+xgb_res %>% 
+  select(id, splits) %>% 
+    mutate(train = map(splits, analysis),
+         test = map(splits, assessment)) %>% 
+  unnest(train) %>% 
+  group_by(id) %>% 
+  summarize(cnt = n(),
+            min_date = min(date),
+            max_date = max(date))
+```
+
+```{r}
+xgb_res %>% 
+  select(id, .metrics) %>% 
+  unnest(.metrics)
+```
+
+
+```{r}
+xgb_res %>% 
+  collect_metrics()
+```
+
+```{r}
+xgb_res %>% 
+  collect_predictions() %>% 
+  group_by(id) %>% 
+  count()
+```
+
+
+
+
