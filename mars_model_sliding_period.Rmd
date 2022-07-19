@@ -1,0 +1,150 @@
+---
+title: "Linear Regression: Many Models"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(pins)
+library(janitor)
+library(lubridate)
+
+options(scipen=999)
+
+```
+
+```{r}
+
+board <-
+  board_folder(getwd())
+
+train <- 
+  board %>% 
+  pin_read('train') %>% 
+  mutate(day_of_week = as.factor(day_of_week))
+
+valid <-
+  board %>% 
+  pin_read('valid') %>% 
+  mutate(day_of_week = as.factor(day_of_week))
+
+store <- 
+  read.csv('store.csv') %>% 
+  clean_names()
+
+train_sub <-
+  train %>% 
+  filter(store %in% c(1, 2)) %>% 
+  left_join(store, by = c('store' = 'store'))
+
+
+train_store <-
+  train %>% 
+  left_join(store, by = c('store' = 'store'))
+
+```
+
+
+```{r}
+train_store <-
+  train_store %>% 
+  mutate(
+          week_of_year = week(date),
+          month_of_year = month(date),
+          month_abb = as.character(month(date, label = TRUE)),
+          p2_start_date = make_date(year = promo2since_year, month = 1, day = 1) + weeks(promo2since_week),
+          ind_promo2_month = ifelse(str_detect(promo_interval, month_abb) & date >= p2_start_date, 1, 0),
+          months_in_promo2 = replace_na(interval(p2_start_date, date) / months(1), -1),
+          competition_date = make_date(competition_open_since_year, competition_open_since_month, 1),
+          months_competition = ifelse(competition_date <= date, round(interval(competition_date, date) / months(1), 0), NA)
+    
+  ) 
+  
+
+train_store
+```
+
+```{r}
+folds <- 
+  sliding_period(train_store %>% arrange(date), date, period = 'month', lookback = Inf, assess_stop = 2, every =4)
+```
+
+```{r}
+recipe_base <-
+  recipe(sales ~
+           day_of_week +
+           open +
+           promo +
+           store,
+         data = train_sub) 
+
+
+
+any(is.na(juice(prep(recipe_base))))
+```
+
+```{r}
+mars_model <-
+  function(x){
+    
+  mars_rec <- 
+    recipe(sales ~ day_of_week + open + promo, data = x) %>% 
+    step_dummy(all_nominal())
+  
+  
+
+  mars_model <- mars(num_terms = tune(), prod_degree = tune()) %>% 
+    set_mode('regression') %>% 
+    set_engine('earth')
+  
+  mars_grid <-
+  grid_regular(parameters(mars_model), levels = 10)
+    
+  
+mars_wf <-
+  workflow() %>% 
+  add_model(mars_model) %>% 
+  add_recipe(mars_rec) 
+
+
+resamples <- 
+  sliding_period(x %>% arrange(date), date, period = 'month', lookback = Inf, assess_stop = 2, every =4)
+
+mars_res <-
+  mars_wf %>% 
+  tune_grid(resamples = resamples,
+            grid = mars_grid,
+            metrics = metric_set(mae))
+            
+            
+mars_tune <-
+  mars_res %>% 
+  select_best('mae')
+
+
+mars_wf <-
+  mars_wf %>% 
+  finalize_workflow(mars_tune) 
+
+final_model <-
+  fit(mars_wf, x)
+
+return(final_model)
+    
+  }
+```
+
+
+```{r}
+mars_models <-
+  train_store %>% 
+  group_by(store) %>% 
+  nest() %>% 
+  mutate(model = map(data, mars_model))
+```
+
+
+
+
+
