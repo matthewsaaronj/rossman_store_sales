@@ -9,6 +9,8 @@ library(tidymodels)
 library(pins)
 library(lubridate)
 library(janitor)
+library(doParallel)
+library(xgboost)
 
 options(scipen = 999)
 ```
@@ -41,7 +43,11 @@ train_sub <-
   filter(store %in% c(1, 2)) %>% 
   left_join(store, by = c('store' = 'store'))
 
-train_sub
+
+train_store <-
+  train %>% 
+  left_join(store, by = c('store' = 'store'))
+
 ```
 
 # Feature Engineering Ideas
@@ -54,34 +60,87 @@ train_sub
 # use some store level data such as the
   : average sales for that store for that day -- but you need to be careful not to leak information with this.
   - think of other store level data as this will be the optimal approach
+  
+```{r}
+names(train)
+```
+  
+
+
+```{r}
+train_store <-
+  train_store %>% 
+  mutate(
+          week_of_year = week(date),
+          month_of_year = month(date),
+          month_abb = as.character(month(date, label = TRUE)),
+          p2_start_date = make_date(year = promo2since_year, month = 1, day = 1) + weeks(promo2since_week),
+          ind_promo2_month = ifelse(str_detect(promo_interval, month_abb) & date >= p2_start_date, 1, 0),
+          months_in_promo2 = replace_na(interval(p2_start_date, date) / months(1), -1),
+          competition_date = make_date(competition_open_since_year, competition_open_since_month, 1),
+          months_competition = ifelse(competition_date <= date, round(interval(competition_date, date) / months(1), 0), NA)
+    
+  ) 
+  
+
+train_store
+```
+
+
+
 
 ```{r}
 xgb_rec <-
   recipe(
     sales ~
       day_of_week +
+      # date + 
+      # store +
       open +
       promo +
       state_holiday +
       school_holiday +
-      store +
-      date
-    , data = train
+      store_type +
+      assortment +
+      competition_distance +
+      promo2 +
+      ind_promo2_month +
+      months_in_promo2 +
+      months_competition 
+    , data = train_store
   ) %>% 
-  update_role(store , new_role = 'id variable') %>% 
-  update_role(date, new_role = 'id variable') %>% 
   step_dummy(state_holiday, one_hot = TRUE) %>% 
-  step_mutate(day_of_week = as.numeric(as.character(day_of_week)))
+  step_dummy(store_type, one_hot = TRUE) %>% 
+  step_dummy(assortment, one_hot = TRUE) %>% 
+  step_mutate(
+              day_of_week = as.numeric(as.character(day_of_week))
+              ) 
+  # update_role(store, new_role =  'id variable') %>%
+  # update_role(date, new_role = 'id variable') 
+
+# 
+# exp_rec <-
+#   recipe(
+#     sales ~
+#       day_of_week +
+#       open +
+#       promo 
+#     , data = train_store
+#   ) %>% 
+#   step_mutate(day_of_week = as.numeric(as.character(day_of_week)))
+
+juiced_rec <- juice(prep(xgb_rec))
+
+juiced_rec
 
 
-xgb_rec
 
 ```
 ```{r}
 set.seed(42)
 
 
-sliding_period(train %>% arrange(date), date, period = 'month', lookback = Inf, assess_stop = 2, every = 4, complete = TRUE) %>% 
+sliding_period(train_store %>% arrange(date), date, period = 'month', lookback = Inf, assess_stop = 2, every = 4, complete = TRUE) %>% 
   mutate(train_data = map(splits, analysis),
          test_data = map(splits, assessment)) %>% 
   select(-splits) %>% 
@@ -98,13 +157,15 @@ sliding_period(train %>% arrange(date), date, period = 'month', lookback = Inf, 
 
 ```{r}
 folds <- 
-  sliding_period(train %>% arrange(date), date, period = 'month', lookback = Inf, assess_stop = 2, every = 4)
+  sliding_period(train_store %>% arrange(date), date, period = 'month', lookback = Inf, assess_stop = 2, every = 4)
 
 folds
 ```
 
 
 ```{r}
+
+
 xgb_model <-
   boost_tree(
     trees = 500
@@ -144,6 +205,53 @@ xgb_res %>%
 xgb_res %>% 
   select(id, .metrics) %>% 
   unnest(.metrics)
+```
+# Model Tuning
+```{r}
+set.seed(42)
+
+
+xgb_model <-
+  parsnip::boost_tree(
+    trees = 500,
+    min_n = tune(),
+    tree_depth = tune(),
+    learn_rate = tune(),
+    loss_reduction = tune(),
+    sample_size = tune(),
+    mtry = tune()
+  ) %>% 
+  set_mode('regression') %>% 
+  set_engine('xgboost')
+
+xgb_wf <-
+  workflow() %>% 
+  add_model(xgb_model) %>% 
+  add_recipe(xgb_rec)
+
+xgb_params <-
+  xgb_wf %>% 
+  parameters() %>% 
+  finalize(train_store)
+
+cl <- makePSOCKcluster(detectCores()-1)
+registerDoParallel(cl)
+
+
+
+xgb_bs <-
+  xgb_wf %>% 
+  tune_bayes(
+    resamples = folds,
+    param_info = xgb_params,
+    iter = 50,
+    control = control_bayes(save_pred = TRUE, verbose = TRUE, no_improve = 25),
+    metrics = metric_set(mae)
+    
+  )
+
+stopCluster(cl)
+  
 ```
 
 
