@@ -1,0 +1,250 @@
+---
+title: "Multilevel Linear Model"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(pins)
+library(lubridate)
+library(lme4)
+library(janitor)
+library(multilevelmod)
+
+options(scipen=999)
+
+```
+
+
+
+```{r}
+board <-
+  board_folder(getwd())
+
+train <- 
+  board %>% 
+  pin_read('train') %>% 
+  mutate(day_of_week = as.factor(day_of_week))
+
+valid <-
+  board %>% 
+  pin_read('valid') %>% 
+  mutate(day_of_week = as.factor(day_of_week))
+
+store <- 
+  read.csv('store.csv') %>% 
+  clean_names()
+```
+
+
+```{r}
+set.seed(4)
+
+train_sub <-
+  train %>% 
+  filter(store %in% c(1:10)) %>% 
+  left_join(store, by = c('store' = 'store'))
+
+
+train_store <-
+  train %>% 
+  left_join(store, by = c('store' = 'store'))
+
+```
+
+
+```{r}
+str(train_store)
+```
+```{r}
+folds <- 
+  sliding_period(train_store %>% arrange(date), date, period = 'month', lookback = Inf, assess_stop = 2, every = 4)
+
+folds
+```
+
+```{r}
+recipe_base <-
+  recipe(sales ~
+           day_of_week +
+           open +
+           promo +
+           store,
+         data = train_sub) 
+
+
+
+any(is.na(juice(prep(recipe_base))))
+```
+
+```{r}
+mod_base <- sales ~ day_of_week + open + promo +
+              (day_of_week + open + promo | store)
+  
+```
+
+
+
+```{r}
+
+cv_mlm <- function(formula, resamples, keep_preds = FALSE){
+  assess_mae = c()
+  preds_out <- data.frame()
+
+  for(x in 1:length(resamples$splits)){
+    
+    analysis <- analysis(resamples$splits[[x]])
+    assessment <- assessment(resamples$splits[[x]])
+    mlm <- lmer(formula,
+                data = analysis)
+    
+    assessment <-
+      assessment %>% 
+      mutate(preds = predict(mlm, newdata = assessment)) 
+    
+    
+    mae_out <-
+      yardstick::mae(data = assessment, truth = sales, estimate = preds) %>% 
+        select(.estimate) %>% 
+        pull()
+    
+    assess_mae <- c(assess_mae, mae_out)
+    
+    if(keep_preds == TRUE){
+      
+      preds_out <- 
+        bind_rows(preds_out, assessment)
+    }
+    
+  }
+  
+  if(keep_preds == TRUE){
+    return(list(assess_stats = assess_mae, predictions = preds_out))
+  } else{
+    return(mae_out)
+  }
+    
+}
+```
+
+
+```{r}
+results_base <- cv_mlm(mod_base, folds, keep_preds = TRUE)
+```
+
+```{r}
+saveRDS(object = results_base, file = 'mlm_results_base')
+```
+
+
+
+```{r}
+mean(results_base$assess_stats)
+```
+
+
+```{r}
+
+# currenty a bug in multilevelmod, need to use base lmer function and not rely on tidymodels for modeling.
+get_cv_performance <-
+  function(recipe, formula = NULL) {
+    set.seed(42)
+    
+    recipe <- recipe_base
+    formula <- formula_base
+    
+    
+    
+    # define model
+    mlm_spec <-
+    linear_reg() %>% 
+    set_engine('lmer')
+    
+  #   mlm_wflow <-
+  # workflow() %>% 
+  # add_variables(outcomes = sales, predictors = c(day_of_week, open, promo, state_holiday, store)) %>% 
+  # add_model(mlm_spec, formula = sales ~ day_of_week + open + promo + state_holiday + (day_of_week + open + promo + state_holiday | store))
+
+    
+    # define workflow
+    mlm_wflow <-
+      workflow() %>% 
+      add_recipe(recipe) %>% 
+      add_model(mlm_spec, formula = formula)
+    
+    x <- 1
+    analysis <- analysis(folds$splits[[x]])
+    assessment <- assessment(folds$splits[[1]])
+
+    mlm_fit <- fit(mlm_wflow, data = analysis)
+    
+    predict(mlm_fit, new_data = assessment)
+    
+    
+    # perform cross-validation
+    keep_pred <- control_resamples(save_pred = TRUE, save_workflow = TRUE) 
+    
+    mlm_cv <-
+      mlm_wflow %>% 
+      fit_resamples(resamples = folds,
+                    control = keep_pred,
+                    metrics = metric_set(mae))
+    
+  }
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+set.seed(42)
+mlm <- lmer(sales ~ day_of_week + open + promo +
+            (day_of_week + open + promo | store),
+            data = analysis)
+  
+  
+summary(mlm)
+```
+
+```{r}
+
+set.seed(42)
+library(multilevelmod)
+
+mlm_spec <-
+  linear_reg() %>% 
+  set_engine('lmer')
+
+mlm_wflow <-
+  workflow() %>% 
+  add_variables(outcomes = sales, predictors = c(day_of_week, open, promo, state_holiday, store)) %>% 
+  add_model(mlm_spec, formula = sales ~ day_of_week + open + promo + state_holiday + (day_of_week + open + promo + state_holiday | store))
+
+mlm_fit <- fit(mlm_wflow, data = train_sub)
+
+mlm_fit
+
+
+```
+
+
+
+
+```{r}
+
+
+keep_pred <- control_resamples(save_pred = TRUE, save_workflow = TRUE) 
+
+mlm_res <-
+  mlm_wflow %>% 
+  fit_resamples(resamples = folds,
+                control = keep_pred,
+                metrics = metric_set(mae))
+
+
+```
+
